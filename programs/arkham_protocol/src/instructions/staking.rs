@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use crate::state::{Warden, ProtocolConfig};
+use crate::state::Warden;
 
 // The handler function for the initialize_warden instruction.
 // The actual logic will be implemented in a future step.
