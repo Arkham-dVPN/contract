@@ -94,6 +94,32 @@ pub mod arkham_protocol {
     pub fn claim_arkham_tokens(ctx: Context<ClaimArkhamTokens>) -> Result<()> {
         instructions::payments::claim_arkham_tokens_handler(ctx)
     }
+
+    // ============================================
+    // Reputation Instructions
+    // ============================================
+
+    pub fn update_reputation(
+        ctx: Context<UpdateReputation>,
+        connection_success: bool,
+        uptime_report: u16,
+    ) -> Result<()> {
+        instructions::reputation::update_reputation_handler(
+            ctx,
+            connection_success,
+            uptime_report,
+        )
+    }
+
+    pub fn update_premium_pool_rankings(
+        ctx: Context<UpdatePremiumPoolRankings>,
+        top_wardens: Vec<Pubkey>,
+    ) -> Result<()> {
+        instructions::reputation::update_premium_pool_rankings_handler(
+            ctx,
+            top_wardens,
+        )
+    }
 }
 
 #[derive(Accounts)]
@@ -140,6 +166,10 @@ pub enum ArkhamErrorCode {
     // Privacy errors
     #[msg("Private payments not yet implemented.")]
     PrivatePaymentsNotImplemented,
+
+    // Reputation errors
+    #[msg("Unauthorized reputation update attempt.")]
+    UnauthorizedReputationUpdate,
 
     // General errors
     #[msg("Arithmetic operation resulted in overflow.")]

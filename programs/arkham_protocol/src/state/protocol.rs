@@ -11,7 +11,7 @@ pub struct ProtocolConfig {
     pub tier_multipliers: [u16; 3], // basis points
     pub tokens_per_5gb: u64,
     pub geo_premiums: Vec<GeoPremium>,
-    pub updater_authority: Pubkey,
+    pub reputation_updater: Pubkey, // Authority allowed to update reputations
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq, Eq)]
