@@ -120,6 +120,48 @@ pub mod arkham_protocol {
             top_wardens,
         )
     }
+
+    // ============================================
+    // Admin Instructions
+    // ============================================
+
+    pub fn update_protocol_config(
+        ctx: Context<UpdateProtocolConfig>,
+        new_base_rate_per_mb: Option<u64>,
+        new_protocol_fee_bps: Option<u16>,
+        new_tier_thresholds: Option<[u64; 3]>,
+        new_tier_multipliers: Option<[u16; 3]>,
+        new_tokens_per_5gb: Option<u64>,
+        new_geo_premiums: Option<Vec<GeoPremium>>,
+        new_reputation_updater: Option<Pubkey>,
+    ) -> Result<()> {
+        instructions::admin::update_protocol_config_handler(
+            ctx,
+            new_base_rate_per_mb,
+            new_protocol_fee_bps,
+            new_tier_thresholds,
+            new_tier_multipliers,
+            new_tokens_per_5gb,
+            new_geo_premiums,
+            new_reputation_updater,
+        )
+    }
+
+    pub fn initialize_arkham_mint(ctx: Context<InitializeArkhamMint>) -> Result<()> {
+        instructions::admin::initialize_arkham_mint_handler(ctx)
+    }
+
+    pub fn distribute_subsidies(
+        ctx: Context<DistributeSubsidies>,
+        warden_keys: Vec<Pubkey>,
+        subsidy_amounts: Vec<u64>,
+    ) -> Result<()> {
+        instructions::admin::distribute_subsidies_handler(
+            ctx,
+            warden_keys,
+            subsidy_amounts,
+        )
+    }
 }
 
 #[derive(Accounts)]
@@ -170,6 +212,26 @@ pub enum ArkhamErrorCode {
     // Reputation errors
     #[msg("Unauthorized reputation update attempt.")]
     UnauthorizedReputationUpdate,
+
+    // Admin errors
+    #[msg("Unauthorized admin action - caller is not the protocol authority.")]
+    UnauthorizedAdminAction,
+    #[msg("Invalid fee basis points - must be <= 10000 (100%).")]
+    InvalidFeeBps,
+    #[msg("Invalid tier thresholds - must be in ascending order.")]
+    InvalidTierThresholds,
+    #[msg("Invalid tier multiplier - must be <= 50000 (5x).")]
+    InvalidTierMultiplier,
+    #[msg("Invalid geographic premium - must be <= 50000 (500%).")]
+    InvalidGeoPremium,
+    #[msg("Duplicate region code found in geographic premiums.")]
+    DuplicateRegionCode,
+    #[msg("ARKHAM token mint is already initialized.")]
+    TokenMintAlreadyInitialized,
+    #[msg("Invalid subsidy distribution - vectors must have the same length.")]
+    InvalidSubsidyDistribution,
+    #[msg("Insufficient treasury balance for subsidy distribution.")]
+    InsufficientTreasuryBalance,
 
     // General errors
     #[msg("Arithmetic operation resulted in overflow.")]

@@ -1,5 +1,5 @@
 use anchor_lang::{prelude::*, system_program};
-use anchor_spl::token::{Token, Transfer};
+use anchor_spl::token::{self, Mint, Token, TokenAccount, MintTo};
 use anchor_lang::solana_program::sysvar::instructions::ID as INSTRUCTIONS_SYSVAR_ID;
 use crate::state::{Seeker, Warden, Connection, ProtocolConfig, BandwidthProof};
 use crate::ArkhamErrorCode;
@@ -403,10 +403,11 @@ pub fn claim_earnings_handler(
 pub fn claim_arkham_tokens_handler(ctx: Context<ClaimArkhamTokens>) -> Result<()> {
     let warden = &mut ctx.accounts.warden;
     let config = &ctx.accounts.protocol_config;
+    let amount = warden.arkham_tokens_earned;
 
     // 1. Verify there are tokens to claim
     require!(
-        warden.arkham_tokens_earned > 0,
+        amount > 0,
         ArkhamErrorCode::NothingToClaim
     );
 
@@ -416,23 +417,36 @@ pub fn claim_arkham_tokens_handler(ctx: Context<ClaimArkhamTokens>) -> Result<()
         ArkhamErrorCode::TokenMintNotInitialized
     );
 
-    let amount = warden.arkham_tokens_earned;
+    // 3. Mint tokens to warden's token account using PDA authority
+    let authority_bump = ctx.bumps.mint_authority;
+    
+    let seeds = &[
+        b"arkham".as_ref(),
+        b"mint".as_ref(),
+        b"authority".as_ref(),
+        &[authority_bump]
+    ];
+    let signer_seeds = &[&seeds[..]];
 
-    // 3. Mint tokens to warden's token account
-    // TODO: Implement token minting with PDA signer
-    // This requires the protocol to be the mint authority
-    // For now, return an error
-    return err!(ArkhamErrorCode::TokenMintingNotImplemented);
+    let cpi_accounts = MintTo {
+        mint: ctx.accounts.arkham_mint.to_account_info(),
+        to: ctx.accounts.warden_arkham_token_account.to_account_info(),
+        authority: ctx.accounts.mint_authority.to_account_info(),
+    };
+
+    let cpi_program = ctx.accounts.token_program.to_account_info();
+    let cpi_context = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer_seeds);
+    token::mint_to(cpi_context, amount)?;
 
     // 4. Reset earned tokens counter
-    // warden.arkham_tokens_earned = 0;
+    warden.arkham_tokens_earned = 0;
 
-    // emit!(TokensClaimed {
-    //     authority: warden.authority,
-    //     amount,
-    // });
+    emit!(TokensClaimed {
+        authority: warden.authority,
+        amount,
+    });
 
-    // Ok(())
+    Ok(())
 }
 
 // Account contexts:
@@ -561,9 +575,36 @@ pub struct ClaimArkhamTokens<'info> {
     #[account(mut)]
     pub authority: Signer<'info>,
 
+    #[account(
+        seeds = [b"protocol", b"config"],
+        bump,
+    )]
     pub protocol_config: Account<'info, ProtocolConfig>,
 
-    // TODO: Add token accounts when implementing minting
+    #[account(
+        mut,
+        seeds = [b"arkham_mint"],
+        bump,
+    )]
+    pub arkham_mint: Account<'info, Mint>,
+
+    #[account(
+        mut,
+        associated_token::mint = arkham_mint,
+        associated_token::authority = authority,
+    )]
+    pub warden_arkham_token_account: Account<'info, TokenAccount>,
+
+    /// CHECK: Mint authority for the ARKHAM token - PDA controlled by the program
+    #[account(
+        seeds = [b"arkham", b"mint", b"authority"],
+        bump,
+    )]
+    pub mint_authority: AccountInfo<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, anchor_spl::associated_token::AssociatedToken>,
+    pub system_program: Program<'info, System>,
 }
 
 // Events:
