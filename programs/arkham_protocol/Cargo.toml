@@ -21,4 +21,3 @@ idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
 anchor-lang = "0.31.1"
 anchor-spl = "0.31.1"
 pyth-sdk-solana = "0.10.6"
-

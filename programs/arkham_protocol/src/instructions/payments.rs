@@ -1,5 +1,6 @@
 use anchor_lang::{prelude::*, system_program};
-use anchor_spl::token::{self, Token, TokenAccount, Transfer};
+use anchor_spl::token::{Token, Transfer};
+use anchor_lang::solana_program::sysvar::instructions::ID as INSTRUCTIONS_SYSVAR_ID;
 use crate::state::{Seeker, Warden, Connection, ProtocolConfig, BandwidthProof};
 use crate::ArkhamErrorCode;
 
@@ -147,23 +148,89 @@ pub fn submit_bandwidth_proof_handler(
     seeker_signature: [u8; 64],
     warden_signature: [u8; 64],
 ) -> Result<()> {
+    // Get the connection key before we mutably borrow the connection
+    let connection_key = ctx.accounts.connection.key();
+    let warden_key = ctx.accounts.warden.key();
+    let seeker_key = ctx.accounts.seeker.key();
+    
     let connection = &mut ctx.accounts.connection;
     let warden = &mut ctx.accounts.warden;
+    let seeker = &ctx.accounts.seeker;
     let config = &ctx.accounts.protocol_config;
     let clock = Clock::get()?;
 
-    // 1. Verify signatures (simplified - in production use proper Ed25519 verification)
-    // TODO: Implement proper signature verification using ed25519-dalek or Solana's native verification
-    
-    // For now, we'll create the proof and assume signatures are valid
-    // In production, reconstruct the message and verify both signatures
+    // 1. Validate the proof using bandwidth module helpers
+    crate::instructions::bandwidth::validate_bandwidth_proof(
+        mb_consumed,
+        clock.unix_timestamp,
+        clock.unix_timestamp,
+        &seeker_signature,
+        &warden_signature,
+    )?;
 
-    // 2. Calculate payment amount
+    // 2. Create the deterministic message and verify Ed25519 signatures
+    let proof_message = crate::instructions::bandwidth::create_proof_message(
+        &connection_key,
+        mb_consumed,
+        clock.unix_timestamp,
+    );
+    
+    // REAL Ed25519 VERIFICATION using instruction introspection
+    crate::instructions::bandwidth::verify_dual_signatures(
+        &ctx.accounts.instructions_sysvar,
+        &proof_message,
+        &seeker_signature,
+        &seeker.authority,
+        &warden_signature,
+        &warden.authority,
+    )?;
+
+    // 3. Check for duplicate proofs (prevent replay attacks)
+    let proof_hash = crate::instructions::bandwidth::hash_bandwidth_proof(
+        &connection_key,
+        mb_consumed,
+        clock.unix_timestamp,
+        &seeker_signature,
+        &warden_signature,
+    );
+    
+    // Check if this proof hash already exists in our history
+    for existing_proof in &connection.bandwidth_proofs {
+        let existing_hash = crate::instructions::bandwidth::hash_bandwidth_proof(
+            &connection_key,
+            existing_proof.mb_consumed,
+            existing_proof.timestamp,
+            &existing_proof.seeker_signature,
+            &existing_proof.warden_signature,
+        );
+        
+        require!(
+            proof_hash != existing_hash,
+            crate::instructions::bandwidth::BandwidthError::InvalidSignature
+        );
+    }
+
+    // 4. Anomaly detection (optional - flag suspicious claims)
+    if connection.bandwidth_proofs.len() >= 3 {
+        let historical: Vec<u64> = connection.bandwidth_proofs
+            .iter()
+            .map(|p| p.mb_consumed)
+            .collect();
+        
+        let expected = crate::instructions::bandwidth::calculate_expected_bandwidth(&historical, 5);
+        
+        if crate::instructions::bandwidth::detect_bandwidth_anomaly(mb_consumed, expected, 3.0) {
+            msg!("Warning: Anomalous bandwidth detected. Expected: {}, Claimed: {}", expected, mb_consumed);
+            // Continue processing but log the warning for reputation system
+        }
+    }
+
+    // 5. Calculate payment amount
     let payment_amount = (mb_consumed as u128)
         .checked_mul(connection.rate_per_mb as u128)
         .ok_or(ArkhamErrorCode::ArithmeticOverflow)? as u64;
 
-    // 3. Verify payment doesn't exceed available escrow
+    // 6. Verify payment doesn't exceed available escrow
     let new_total_paid = connection.amount_paid
         .checked_add(payment_amount)
         .ok_or(ArkhamErrorCode::ArithmeticOverflow)?;
@@ -173,19 +240,19 @@ pub fn submit_bandwidth_proof_handler(
         ArkhamErrorCode::InsufficientConnectionEscrow
     );
 
-    // 4. Transfer payment to warden's pending claims
+    // 7. Transfer payment to warden's pending claims
     warden.pending_claims = warden.pending_claims
         .checked_add(payment_amount)
         .ok_or(ArkhamErrorCode::ArithmeticOverflow)?;
 
-    // 5. Update connection bandwidth and payment tracking
+    // 8. Update connection bandwidth and payment tracking
     connection.bandwidth_consumed = connection.bandwidth_consumed
         .checked_add(mb_consumed)
         .ok_or(ArkhamErrorCode::ArithmeticOverflow)?;
     
     connection.amount_paid = new_total_paid;
 
-    // 6. Update warden statistics
+    // 9. Update warden statistics
     warden.total_bandwidth_served = warden.total_bandwidth_served
         .checked_add(mb_consumed)
         .ok_or(ArkhamErrorCode::ArithmeticOverflow)?;
@@ -194,8 +261,7 @@ pub fn submit_bandwidth_proof_handler(
         .checked_add(payment_amount)
         .ok_or(ArkhamErrorCode::ArithmeticOverflow)?;
 
-    // 7. Calculate and add ARKHAM token allocation
-    // tokens_per_5gb / 5120 MB = tokens per MB
+    // 10. Calculate and add ARKHAM token allocation
     let tokens_per_mb = config.tokens_per_5gb / 5120;
     let arkham_earned = (mb_consumed as u128)
         .checked_mul(tokens_per_mb as u128)
@@ -205,7 +271,7 @@ pub fn submit_bandwidth_proof_handler(
         .checked_add(arkham_earned)
         .ok_or(ArkhamErrorCode::ArithmeticOverflow)?;
 
-    // 8. Add proof to bandwidth_proofs vector (limit to last 10)
+    // 11. Add proof to bandwidth_proofs vector (limit to last 10)
     let proof = BandwidthProof {
         timestamp: clock.unix_timestamp,
         mb_consumed,
@@ -218,14 +284,14 @@ pub fn submit_bandwidth_proof_handler(
     }
     connection.bandwidth_proofs.push(proof);
 
-    // 9. Update last proof timestamp
+    // 12. Update last proof timestamp
     connection.last_proof_at = clock.unix_timestamp;
 
-    // 10. Update warden's last active timestamp
+    // 13. Update warden's last active timestamp
     warden.last_active = clock.unix_timestamp;
 
     emit!(BandwidthProofSubmitted {
-        connection: ctx.accounts.connection.key(),
+        connection: connection_key,
         mb_consumed,
         payment_amount,
         arkham_earned,
@@ -422,14 +488,22 @@ pub struct SubmitBandwidthProof<'info> {
         mut,
         seeds = [b"connection", connection.seeker.as_ref(), connection.warden.as_ref()],
         bump,
-        has_one = warden
+        has_one = warden,
+        has_one = seeker
     )]
     pub connection: Account<'info, Connection>,
 
     #[account(mut)]
     pub warden: Account<'info, Warden>,
 
+    #[account(mut)]
+    pub seeker: Account<'info, Seeker>,
+
     pub protocol_config: Account<'info, ProtocolConfig>,
+
+    /// CHECK: Instructions sysvar for Ed25519 verification
+    #[account(address = INSTRUCTIONS_SYSVAR_ID)]
+    pub instructions_sysvar: AccountInfo<'info>,
 
     /// Either seeker or warden can submit proofs
     pub submitter: Signer<'info>,
