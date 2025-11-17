@@ -273,8 +273,6 @@ pub struct InitializeWarden<'info> {
     #[account(
         init,
         payer = authority,
-        // Space calculation needs to be precise.
-        // Using a generous 512 bytes for now to accommodate string and option types.
         space = 8 + 512,
         seeds = [b"warden", authority.key().as_ref()],
         bump
@@ -284,32 +282,47 @@ pub struct InitializeWarden<'info> {
     #[account(mut)]
     pub authority: Signer<'info>,
 
-    // Ensure this is the correct protocol config account
-    #[account(seeds = [b"protocol", b"config"], bump)]
+    #[account(seeds = [b"protocol_config"], bump)]
     pub protocol_config: Account<'info, ProtocolConfig>,
 
-    /// CHECK: User's source account for the stake. For SOL, this is the signer. For SPL, it's a token account.
+    /// CHECK: User's source account for the stake
     #[account(mut)]
     pub stake_from_account: AccountInfo<'info>,
 
-    /// The protocol's SOL vault (PDA).
     #[account(mut, seeds = [b"sol_vault"], bump)]
     pub sol_vault: SystemAccount<'info>,
 
-    #[account(mut)]
+    #[account(
+        init_if_needed,
+        payer = authority,
+        associated_token::mint = usdc_mint,
+        associated_token::authority = sol_vault,
+    )]
     pub usdc_vault: Account<'info, TokenAccount>,
 
-    #[account(mut)]
+    #[account(
+        init_if_needed,
+        payer = authority,
+        associated_token::mint = usdt_mint,
+        associated_token::authority = sol_vault,
+    )]
     pub usdt_vault: Account<'info, TokenAccount>,
 
-    /// CHECK: Pyth SOL/USD price feed. Address constraint will be added in production.
+    pub usdc_mint: Account<'info, anchor_spl::token::Mint>,
+    pub usdt_mint: Account<'info, anchor_spl::token::Mint>,
+
+    /// CHECK: Pyth SOL/USD price feed - verified by Pyth SDK
     pub sol_usd_price_feed: AccountInfo<'info>,
-    /// CHECK: Pyth USDT/USD price feed. Address constraint will be added in production.
+
+    /// CHECK: Pyth USDT/USD price feed - verified by Pyth SDK
     pub usdt_usd_price_feed: AccountInfo<'info>,
 
     pub system_program: Program<'info, System>,
     pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, anchor_spl::associated_token::AssociatedToken>,
 }
+
+
 
 // Add account contexts at the end of staking.rs:
 

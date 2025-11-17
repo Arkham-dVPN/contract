@@ -576,7 +576,7 @@ pub struct ClaimArkhamTokens<'info> {
     pub authority: Signer<'info>,
 
     #[account(
-        seeds = [b"protocol", b"config"],
+        seeds = [b"protocol_config"],
         bump,
     )]
     pub protocol_config: Account<'info, ProtocolConfig>,

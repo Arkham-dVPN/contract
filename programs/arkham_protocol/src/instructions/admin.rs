@@ -3,6 +3,51 @@ use anchor_spl::token::{Mint, Token};
 use crate::state::{ProtocolConfig, GeoPremium};
 use crate::ArkhamErrorCode;
 
+/// Initializes the protocol configuration with default parameters
+/// This must be called once before any other protocol operations
+pub fn initialize_protocol_config_handler(
+    ctx: Context<InitializeProtocolConfig>,
+    base_rate_per_mb: u64,
+    protocol_fee_bps: u16,
+    tier_thresholds: [u64; 3],
+    tier_multipliers: [u16; 3],
+    tokens_per_5gb: u64,
+    geo_premiums: Vec<GeoPremium>,
+) -> Result<()> {
+    let protocol_config = &mut ctx.accounts.protocol_config;
+    
+    // Validate parameters
+    require!(protocol_fee_bps <= 10000, ArkhamErrorCode::InvalidFeeBps);
+    require!(
+        tier_thresholds[0] <= tier_thresholds[1] && tier_thresholds[1] <= tier_thresholds[2],
+        ArkhamErrorCode::InvalidTierThresholds
+    );
+    
+    for &multiplier in &tier_multipliers {
+        require!(multiplier <= 50000, ArkhamErrorCode::InvalidTierMultiplier);
+    }
+
+    // Initialize all fields
+    protocol_config.authority = ctx.accounts.authority.key();
+    protocol_config.treasury = ctx.accounts.treasury.key();
+    protocol_config.arkham_token_mint = Pubkey::default(); // Will be set later via initialize_arkham_mint
+    protocol_config.base_rate_per_mb = base_rate_per_mb;
+    protocol_config.protocol_fee_bps = protocol_fee_bps;
+    protocol_config.tier_thresholds = tier_thresholds;
+    protocol_config.tier_multipliers = tier_multipliers;
+    protocol_config.tokens_per_5gb = tokens_per_5gb;
+    protocol_config.geo_premiums = geo_premiums;
+    protocol_config.reputation_updater = ctx.accounts.authority.key(); // Default to authority
+
+    emit!(ProtocolConfigInitialized {
+        authority: ctx.accounts.authority.key(),
+        base_rate_per_mb,
+        protocol_fee_bps,
+    });
+
+    Ok(())
+}
+
 /// Updates protocol configuration parameters
 /// Only callable by the protocol authority
 pub fn update_protocol_config_handler(
@@ -178,7 +223,7 @@ pub fn distribute_subsidies_handler(
 pub struct UpdateProtocolConfig<'info> {
     #[account(
         mut,
-        seeds = [b"protocol", b"config"],
+        seeds = [b"protocol_config"],
         bump,
     )]
     pub protocol_config: Account<'info, ProtocolConfig>,
@@ -209,7 +254,7 @@ pub struct InitializeArkhamMint<'info> {
 
     #[account(
         mut,
-        seeds = [b"protocol", b"config"],
+        seeds = [b"protocol_config"],
         bump,
     )]
     pub protocol_config: Account<'info, ProtocolConfig>,
@@ -224,7 +269,7 @@ pub struct InitializeArkhamMint<'info> {
 #[derive(Accounts)]
 pub struct DistributeSubsidies<'info> {
     #[account(
-        seeds = [b"protocol", b"config"],
+        seeds = [b"protocol_config"],
         bump,
     )]
     pub protocol_config: Account<'info, ProtocolConfig>,
@@ -246,6 +291,36 @@ pub struct DistributeSubsidies<'info> {
 
     // The actual warden accounts would need to be loaded dynamically
     // This is simplified for the core implementation
+}
+
+#[derive(Accounts)]
+pub struct InitializeProtocolConfig<'info> {
+    #[account(
+        init,
+        payer = authority,
+        space = 8 + // discriminator
+                32 + // authority
+                32 + // treasury
+                32 + // arkham_token_mint
+                8 +  // base_rate_per_mb
+                2 +  // protocol_fee_bps
+                (8 * 3) + // tier_thresholds
+                (2 * 3) + // tier_multipliers
+                8 +  // tokens_per_5gb
+                4 + (10 * (1 + 2)) + // geo_premiums vec (assume max 10 regions)
+                32, // reputation_updater
+        seeds = [b"protocol_config"],
+        bump
+    )]
+    pub protocol_config: Account<'info, ProtocolConfig>,
+
+    /// CHECK: Treasury can be any account (e.g., multisig)
+    pub treasury: AccountInfo<'info>,
+
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
 }
 
 // Events:
@@ -271,4 +346,11 @@ pub struct SubsidiesDistributed {
     pub authority: Pubkey,
     pub warden_count: u32,
     pub total_amount: u64,
+}
+
+#[event]
+pub struct ProtocolConfigInitialized {
+    pub authority: Pubkey,
+    pub base_rate_per_mb: u64,
+    pub protocol_fee_bps: u16,
 }

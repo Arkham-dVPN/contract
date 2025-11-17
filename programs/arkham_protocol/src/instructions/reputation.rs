@@ -193,7 +193,7 @@ pub struct UpdateReputation<'info> {
     pub warden: Account<'info, Warden>,
 
     #[account(
-        seeds = [b"protocol", b"config"],
+        seeds = [b"protocol_config"],
         bump,
     )]
     pub protocol_config: Account<'info, ProtocolConfig>,
@@ -208,7 +208,7 @@ pub struct UpdateReputation<'info> {
 #[derive(Accounts)]
 pub struct UpdatePremiumPoolRankings<'info> {
     #[account(
-        seeds = [b"protocol", b"config"],
+        seeds = [b"protocol_config"],
         bump,
     )]
     pub protocol_config: Account<'info, ProtocolConfig>,

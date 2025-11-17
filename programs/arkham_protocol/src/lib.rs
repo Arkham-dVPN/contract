@@ -12,8 +12,28 @@ pub use state::*;
 pub mod arkham_protocol {
     use super::*;
 
+    pub fn initialize_protocol_config(
+        ctx: Context<InitializeProtocolConfig>,
+        base_rate_per_mb: u64,
+        protocol_fee_bps: u16,
+        tier_thresholds: [u64; 3],
+        tier_multipliers: [u16; 3],
+        tokens_per_5gb: u64,
+        geo_premiums: Vec<GeoPremium>,
+    ) -> Result<()> {
+        instructions::admin::initialize_protocol_config_handler(
+            ctx,
+            base_rate_per_mb,
+            protocol_fee_bps,
+            tier_thresholds,
+            tier_multipliers,
+            tokens_per_5gb,
+            geo_premiums,
+        )
+    }
+
     pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
-        msg!("Greetings from: {:?}", ctx.program_id);
+        msg!("Arkham Protocol initialized successfully - PDA creation test");
         Ok(())
     }
 
@@ -165,7 +185,10 @@ pub mod arkham_protocol {
 }
 
 #[derive(Accounts)]
-pub struct Initialize {}
+pub struct Initialize<'info> {
+    /// Simple initialization for testing - just log a message
+    pub dummy_account: Signer<'info>,
+}
 
 #[error_code]
 pub enum ArkhamErrorCode {
