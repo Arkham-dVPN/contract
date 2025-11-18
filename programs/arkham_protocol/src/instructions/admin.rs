@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{Mint, Token};
+use anchor_spl::token::Token;
 use crate::state::{ProtocolConfig, GeoPremium};
 use crate::ArkhamErrorCode;
 
@@ -13,6 +13,7 @@ pub fn initialize_protocol_config_handler(
     tier_multipliers: [u16; 3],
     tokens_per_5gb: u64,
     geo_premiums: Vec<GeoPremium>,
+    oracle_authority: Pubkey,
 ) -> Result<()> {
     let protocol_config = &mut ctx.accounts.protocol_config;
     
@@ -31,6 +32,7 @@ pub fn initialize_protocol_config_handler(
     protocol_config.authority = ctx.accounts.authority.key();
     protocol_config.treasury = ctx.accounts.treasury.key();
     protocol_config.arkham_token_mint = Pubkey::default(); // Will be set later via initialize_arkham_mint
+    protocol_config.oracle_authority = oracle_authority; // Set the new oracle authority
     protocol_config.base_rate_per_mb = base_rate_per_mb;
     protocol_config.protocol_fee_bps = protocol_fee_bps;
     protocol_config.tier_thresholds = tier_thresholds;
@@ -59,6 +61,7 @@ pub fn update_protocol_config_handler(
     new_tokens_per_5gb: Option<u64>,
     new_geo_premiums: Option<Vec<GeoPremium>>,
     new_reputation_updater: Option<Pubkey>,
+    new_oracle_authority: Option<Pubkey>,
 ) -> Result<()> {
     let protocol_config = &mut ctx.accounts.protocol_config;
     
@@ -119,6 +122,10 @@ pub fn update_protocol_config_handler(
 
     if let Some(updater) = new_reputation_updater {
         protocol_config.reputation_updater = updater;
+    }
+
+    if let Some(oracle) = new_oracle_authority {
+        protocol_config.oracle_authority = oracle;
     }
 
     emit!(ProtocolConfigUpdated {
@@ -200,7 +207,7 @@ pub fn distribute_subsidies_handler(
     for (i, _warden_key) in warden_keys.iter().enumerate() {
         // Load the warden account to update pending claims
         // In a real implementation, this would use CPI to update warden pending claims
-        // For this implementation, we focus on the core distribution mechanism
+        // For this implementation, we're emitting an event to indicate the intended distribution
         let _subsidy_amount = subsidy_amounts[i];
         
         // NOTE: In a real implementation, we'd need to load each warden account
@@ -243,7 +250,7 @@ pub struct InitializeArkhamMint<'info> {
         mint::authority = mint_authority,
         mint::freeze_authority = mint_authority,
     )]
-    pub arkham_mint: Account<'info, Mint>,
+    pub arkham_mint: Account<'info, anchor_spl::token::Mint>,
 
     /// CHECK: Mint authority for the ARKHAM token - this is a PDA controlled by the program
     #[account(
@@ -281,7 +288,7 @@ pub struct DistributeSubsidies<'info> {
     )]
     pub treasury: Account<'info, anchor_spl::token::TokenAccount>,
 
-    pub arkham_mint: Account<'info, Mint>,
+    pub arkham_mint: Account<'info, anchor_spl::token::Mint>,
 
     /// CHECK: Treasury authority (e.g., multisig wallet)
     pub treasury_authority: AccountInfo<'info>,
@@ -302,6 +309,7 @@ pub struct InitializeProtocolConfig<'info> {
                 32 + // authority
                 32 + // treasury
                 32 + // arkham_token_mint
+                32 + // oracle_authority
                 8 +  // base_rate_per_mb
                 2 +  // protocol_fee_bps
                 (8 * 3) + // tier_thresholds

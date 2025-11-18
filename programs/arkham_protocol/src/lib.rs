@@ -20,6 +20,7 @@ pub mod arkham_protocol {
         tier_multipliers: [u16; 3],
         tokens_per_5gb: u64,
         geo_premiums: Vec<GeoPremium>,
+        oracle_authority: Pubkey,
     ) -> Result<()> {
         instructions::admin::initialize_protocol_config_handler(
             ctx,
@@ -29,6 +30,7 @@ pub mod arkham_protocol {
             tier_multipliers,
             tokens_per_5gb,
             geo_premiums,
+            oracle_authority,
         )
     }
 
@@ -48,6 +50,9 @@ pub mod arkham_protocol {
         peer_id: String,
         region_code: u8,
         ip_hash: [u8; 32],
+        price: u64,
+        timestamp: i64,
+        signature: [u8; 64],
     ) -> Result<()> {
         instructions::staking::initialize_warden_handler(
             ctx,
@@ -56,6 +61,9 @@ pub mod arkham_protocol {
             peer_id,
             region_code,
             ip_hash,
+            price,
+            timestamp,
+            signature,
         )
     }
 
@@ -154,6 +162,7 @@ pub mod arkham_protocol {
         new_tokens_per_5gb: Option<u64>,
         new_geo_premiums: Option<Vec<GeoPremium>>,
         new_reputation_updater: Option<Pubkey>,
+        new_oracle_authority: Option<Pubkey>,
     ) -> Result<()> {
         instructions::admin::update_protocol_config_handler(
             ctx,
@@ -164,6 +173,7 @@ pub mod arkham_protocol {
             new_tokens_per_5gb,
             new_geo_premiums,
             new_reputation_updater,
+            new_oracle_authority,
         )
     }
 
@@ -211,6 +221,10 @@ pub enum ArkhamErrorCode {
     StalePrice,
     #[msg("The oracle price has too wide of a confidence interval.")]
     InvalidPriceConfidence,
+    #[msg("The provided signature is invalid.")]
+    InvalidSignature,
+    #[msg("The signer of the price data is not the trusted oracle.")]
+    InvalidSigner,
 
     // Payment errors
     #[msg("Insufficient escrow balance.")]
@@ -259,4 +273,18 @@ pub enum ArkhamErrorCode {
     // General errors
     #[msg("Arithmetic operation resulted in overflow.")]
     ArithmeticOverflow,
+}
+
+impl From<crate::instructions::staking::OracleError> for ArkhamErrorCode {
+    fn from(error: crate::instructions::staking::OracleError) -> Self {
+        match error {
+            crate::instructions::staking::OracleError::InvalidInstructionsSysvar => ArkhamErrorCode::InvalidSigner,
+            crate::instructions::staking::OracleError::Ed25519InstructionNotFound => ArkhamErrorCode::InvalidSignature,
+            crate::instructions::staking::OracleError::InvalidEd25519Instruction => ArkhamErrorCode::InvalidSignature,
+            crate::instructions::staking::OracleError::InvalidEd25519Data => ArkhamErrorCode::InvalidSignature,
+            crate::instructions::staking::OracleError::SignatureMismatch => ArkhamErrorCode::InvalidSignature,
+            crate::instructions::staking::OracleError::PublicKeyMismatch => ArkhamErrorCode::InvalidSigner,
+            crate::instructions::staking::OracleError::MessageMismatch => ArkhamErrorCode::InvalidSignature,
+        }
+    }
 }

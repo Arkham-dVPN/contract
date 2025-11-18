@@ -1,6 +1,10 @@
 use anchor_lang::{prelude::*, system_program};
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
-use pyth_sdk_solana::state::PriceAccount as SolanaPriceAccount;
+use anchor_lang::solana_program::{
+    keccak,
+    sysvar::instructions::{load_instruction_at_checked, ID as INSTRUCTIONS_SYSVAR_ID},
+    ed25519_program,
+};
 use crate::state::{Warden, StakeToken, ProtocolConfig, Tier};
 use crate::ArkhamErrorCode;
 
@@ -15,21 +19,39 @@ pub fn initialize_warden_handler(
     peer_id: String,
     region_code: u8,
     ip_hash: [u8; 32],
+    price: u64,           // Price in micro-units (6 decimals) of USD per token
+    timestamp: i64,       // Timestamp of the price data
+    signature: [u8; 64],  // Ed25519 signature of the price and timestamp by the oracle
 ) -> Result<()> {
     let config = &ctx.accounts.protocol_config;
     let clock = Clock::get()?;
     let current_timestamp = clock.unix_timestamp;
 
-    // 1. Calculate USD value of the stake
-    let stake_value_usd = get_stake_usd_value(
-        &stake_token,
-        stake_amount,
-        &ctx.accounts.sol_usd_price_feed,
-        &ctx.accounts.usdt_usd_price_feed,
-        current_timestamp,
-    )?;
+    // Verify that the price data is recent (within 5 minutes)
+    require!(
+        current_timestamp - timestamp <= 300, // 5 minutes
+        ArkhamErrorCode::StalePrice
+    );
 
-    // 2. Determine the tier
+    // Create the message that should have been signed (price + timestamp)
+    let oracle_message = create_oracle_message(price, timestamp);
+
+    // Verify the signature using instruction introspection
+    if let Err(error) = verify_oracle_signature_via_sysvar(
+        &ctx.accounts.instructions_sysvar,
+        &oracle_message,
+        &signature,
+        &config.oracle_authority,
+        0, // Ed25519 instruction should be at index 0
+    ) {
+        // Convert the OracleError to ArkhamErrorCode
+        return Err(error.into());
+    }
+
+    // Calculate USD value of the stake using the provided price
+    let stake_value_usd = calculate_stake_value_usd(&stake_token, stake_amount, price)?;
+
+    // Determine the tier based on USD value
     let tier = if stake_value_usd >= config.tier_thresholds[2] {
         Tier::Gold
     } else if stake_value_usd >= config.tier_thresholds[1] {
@@ -40,7 +62,7 @@ pub fn initialize_warden_handler(
         return err!(ArkhamErrorCode::InsufficientStake);
     };
 
-    // 3. Transfer stake tokens to the appropriate vault
+    // Transfer stake tokens to the appropriate vault
     match stake_token {
         StakeToken::Sol => {
             let cpi_context = CpiContext::new(
@@ -74,7 +96,7 @@ pub fn initialize_warden_handler(
         }
     }
 
-    // 4. Initialize the Warden account
+    // Initialize the Warden account
     let warden = &mut ctx.accounts.warden;
     warden.authority = ctx.accounts.authority.key();
     warden.peer_id = peer_id;
@@ -98,7 +120,7 @@ pub fn initialize_warden_handler(
     warden.premium_pool_rank = None;
     warden.active_connections = 0;
 
-    // 5. Emit a registration event
+    // Emit a registration event
     emit!(WardenRegistered {
         authority: warden.authority,
         tier: warden.tier.clone(),
@@ -107,6 +129,169 @@ pub fn initialize_warden_handler(
     });
 
     Ok(())
+}
+
+/// Creates a deterministic message for oracle price signing
+/// 
+/// The oracle signs: price (8 bytes LE) + timestamp (8 bytes LE)
+/// This creates a 16-byte message that is then hashed for signing
+/// 
+/// # Arguments
+/// * `price` - Price in micro-units (6 decimals)
+/// * `timestamp` - Unix timestamp of the price data
+/// 
+/// # Returns
+/// * `Vec<u8>` - The deterministic message bytes to be signed (32 bytes after hashing)
+pub fn create_oracle_message(price: u64, timestamp: i64) -> Vec<u8> {
+    let mut message = Vec::new();
+    
+    // Add price (8 bytes, little-endian)
+    message.extend_from_slice(&price.to_le_bytes());
+    
+    // Add timestamp (8 bytes, little-endian)
+    message.extend_from_slice(&timestamp.to_le_bytes());
+    
+    // Hash the combined data for a fixed-size message
+    // This provides a 32-byte message suitable for Ed25519 signing
+    let hash = keccak::hash(&message);
+    
+    hash.to_bytes().to_vec()
+}
+
+/// Verifies oracle Ed25519 signature by checking that an Ed25519Program instruction
+/// was included in the same transaction.
+/// 
+/// This approach uses instruction introspection - the client MUST include
+/// an Ed25519Program verification instruction before calling initialize_warden.
+/// 
+/// # Security Model
+/// - Client creates Ed25519Program.createInstructionWithPublicKey() for the oracle signature
+/// - This instruction is placed BEFORE the initialize_warden instruction
+/// - This function verifies that instruction exists and matches our expected data
+/// 
+/// # Arguments
+/// * `instructions_sysvar` - The Instructions sysvar account
+/// * `message` - The message that was signed (hashed price + timestamp)
+/// * `signature` - The 64-byte Ed25519 signature from the oracle
+/// * `oracle_pubkey` - The oracle's public key (from protocol config)
+/// * `instruction_index` - Which instruction index to check (typically 0)
+/// 
+/// # Returns
+/// * `Result<()>` - Ok if signature is valid via Ed25519Program, error otherwise
+pub fn verify_oracle_signature_via_sysvar(
+    instructions_sysvar: &AccountInfo,
+    message: &[u8],
+    signature: &[u8; 64],
+    oracle_pubkey: &Pubkey,
+    instruction_index: u16,
+) -> Result<()> {
+    // Verify we're actually looking at the Instructions sysvar
+    require!(
+        instructions_sysvar.key() == INSTRUCTIONS_SYSVAR_ID,
+        OracleError::InvalidInstructionsSysvar
+    );
+
+    // Load the Ed25519Program instruction at the specified index
+    let ed25519_ix = load_instruction_at_checked(
+        instruction_index as usize,
+        instructions_sysvar,
+    ).map_err(|_| OracleError::Ed25519InstructionNotFound)?;
+
+    // Verify it's actually an Ed25519Program instruction
+    require!(
+        ed25519_ix.program_id == ed25519_program::ID,
+        OracleError::InvalidEd25519Instruction
+    );
+
+    // Parse the Ed25519Program instruction data
+    // Format: [num_signatures: u8, padding: u8, signature_offset: u16, 
+    //          signature_instruction_index: u16, public_key_offset: u16,
+    //          public_key_instruction_index: u16, message_data_offset: u16,
+    //          message_data_size: u16, message_instruction_index: u16,
+    //          ...signature(64), ...pubkey(32), ...message]
+    
+    let data = &ed25519_ix.data;
+    require!(
+        data.len() >= 2 + 5*2 + 64 + 32 + message.len(),
+        OracleError::InvalidEd25519Data
+    );
+
+    // Extract signature from instruction data (starts at byte 14)
+    let sig_start = 14;
+    let sig_end = sig_start + 64;
+    let ix_signature = &data[sig_start..sig_end];
+    
+    // Extract public key (starts after signature)
+    let pk_start = sig_end;
+    let pk_end = pk_start + 32;
+    let ix_pubkey = &data[pk_start..pk_end];
+    
+    // Extract message (starts after public key)
+    let msg_start = pk_end;
+    let msg_end = msg_start + message.len();
+    require!(
+        data.len() >= msg_end,
+        OracleError::InvalidEd25519Data
+    );
+    let ix_message = &data[msg_start..msg_end];
+
+    // Verify the signature matches what we expect
+    require!(
+        ix_signature == signature,
+        OracleError::SignatureMismatch
+    );
+
+    // Verify the public key matches the oracle authority
+    require!(
+        ix_pubkey == oracle_pubkey.to_bytes().as_ref(),
+        OracleError::PublicKeyMismatch
+    );
+
+    // Verify the message matches (hashed price + timestamp)
+    require!(
+        ix_message == message,
+        OracleError::MessageMismatch
+    );
+
+    // If we get here, the Ed25519Program instruction exists and matches our data
+    // The Ed25519Program already verified the signature cryptographically
+    Ok(())
+}
+
+/// Calculates the USD value of a stake using the provided oracle price
+fn calculate_stake_value_usd(stake_token: &StakeToken, stake_amount: u64, oracle_price: u64) -> Result<u64> {
+    match stake_token {
+        StakeToken::Sol => {
+            // SOL has 9 decimals, price is in micro-units (6 decimals) per SOL
+            // So we need to handle the decimal conversion properly
+            let usd_value = (stake_amount as u128)
+                .checked_mul(oracle_price as u128)
+                .ok_or(ArkhamErrorCode::ArithmeticOverflow)?
+                .checked_div(1_000_000_000) // Divide by 10^9 to account for SOL's 9 decimals
+                .ok_or(ArkhamErrorCode::ArithmeticOverflow)?;
+            Ok(usd_value as u64)
+        }
+        StakeToken::Usdc => {
+            // USDC has 6 decimals, price is in micro-units (6 decimals) per USDC
+            // So 1 USDC at $1.00 price = 1_000_000 micro-units
+            let usd_value = (stake_amount as u128)
+                .checked_mul(oracle_price as u128)
+                .ok_or(ArkhamErrorCode::ArithmeticOverflow)?
+                .checked_div(1_000_000) // Divide by 10^6 to account for USDC's 6 decimals
+                .ok_or(ArkhamErrorCode::ArithmeticOverflow)?;
+            Ok(usd_value as u64)
+        }
+        StakeToken::Usdt => {
+            // USDT has 6 decimals, price is in micro-units (6 decimals) per USDT
+            // So 1 USDT at $1.00 price = 1_000_000 micro-units
+            let usd_value = (stake_amount as u128)
+                .checked_mul(oracle_price as u128)
+                .ok_or(ArkhamErrorCode::ArithmeticOverflow)?
+                .checked_div(1_000_000) // Divide by 10^6 to account for USDT's 6 decimals
+                .ok_or(ArkhamErrorCode::ArithmeticOverflow)?;
+            Ok(usd_value as u64)
+        }
+    }
 }
 
 /// Initiates the unstaking process with a 7-day cooldown period
@@ -213,62 +398,10 @@ pub fn claim_unstake_handler(ctx: Context<ClaimUnstake>) -> Result<()> {
     Ok(())
 }
 
-
-
-/// Calculates the USD value of a given stake amount, normalized to 6 decimal places.
-fn get_stake_usd_value<'info>(
-    stake_token: &StakeToken,
-    stake_amount: u64,
-    sol_price_feed: &AccountInfo<'info>,
-    usdt_price_feed: &AccountInfo<'info>,
-    current_timestamp: i64,
-) -> Result<u64> {
-    match stake_token {
-        StakeToken::Sol => {
-            let price_feed = SolanaPriceAccount::account_info_to_feed(sol_price_feed)
-                .map_err(|_| ArkhamErrorCode::InvalidPriceAccount)?;
-            let price = price_feed.get_price_no_older_than(current_timestamp, 60)
-                .ok_or(ArkhamErrorCode::StalePrice)?;
-            
-            // price.expo is negative, e.g., -8 for SOL/USD
-            let exponent = (SOL_DECIMALS as i32 + price.expo) - USD_DECIMALS as i32;
-            if exponent < 0 {
-                // This should not happen with standard tokens but as a safeguard
-                return err!(ArkhamErrorCode::InvalidPriceAccount);
-            }
-            let usd_value = (stake_amount as u128)
-                .checked_mul(price.price as u128)
-                .unwrap()
-                .checked_div(10u128.pow(exponent as u32))
-                .unwrap_or(0);
-            Ok(usd_value as u64)
-        }
-        StakeToken::Usdc => {
-            // Assume 1:1 peg with USD. USDC has 6 decimals, which matches our target USD decimals.
-            Ok(stake_amount)
-        }
-        StakeToken::Usdt => {
-            let price_feed = SolanaPriceAccount::account_info_to_feed(usdt_price_feed)
-                .map_err(|_| ArkhamErrorCode::InvalidPriceAccount)?;
-            let price = price_feed.get_price_no_older_than(current_timestamp, 60)
-                .ok_or(ArkhamErrorCode::StalePrice)?;
-
-            let exponent = (USDT_DECIMALS as i32 + price.expo) - USD_DECIMALS as i32;
-            if exponent < 0 {
-                return err!(ArkhamErrorCode::InvalidPriceAccount);
-            }
-            let usd_value = (stake_amount as u128)
-                .checked_mul(price.price as u128)
-                .unwrap()
-                .checked_div(10u128.pow(exponent as u32))
-                .unwrap_or(0);
-            Ok(usd_value as u64)
-        }
-    }
-}
+// Account Contexts
 
 #[derive(Accounts)]
-#[instruction(stake_token: StakeToken, stake_amount: u64, peer_id: String, region_code: u8, ip_hash: [u8; 32])]
+#[instruction(stake_token: StakeToken, stake_amount: u64, peer_id: String, region_code: u8, ip_hash: [u8; 32], price: u64, timestamp: i64, signature: [u8; 64])]
 pub struct InitializeWarden<'info> {
     #[account(
         init,
@@ -285,6 +418,10 @@ pub struct InitializeWarden<'info> {
     #[account(seeds = [b"protocol_config"], bump)]
     pub protocol_config: Account<'info, ProtocolConfig>,
 
+    /// CHECK: Instructions sysvar for Ed25519 verification
+    #[account(address = INSTRUCTIONS_SYSVAR_ID)]
+    pub instructions_sysvar: AccountInfo<'info>,
+
     /// CHECK: User's source account for the stake
     #[account(mut)]
     pub stake_from_account: AccountInfo<'info>,
@@ -298,7 +435,7 @@ pub struct InitializeWarden<'info> {
         associated_token::mint = usdc_mint,
         associated_token::authority = sol_vault,
     )]
-    pub usdc_vault: Account<'info, TokenAccount>,
+    pub usdc_vault: Account<'info, anchor_spl::token::TokenAccount>,
 
     #[account(
         init_if_needed,
@@ -306,25 +443,15 @@ pub struct InitializeWarden<'info> {
         associated_token::mint = usdt_mint,
         associated_token::authority = sol_vault,
     )]
-    pub usdt_vault: Account<'info, TokenAccount>,
+    pub usdt_vault: Account<'info, anchor_spl::token::TokenAccount>,
 
     pub usdc_mint: Account<'info, anchor_spl::token::Mint>,
     pub usdt_mint: Account<'info, anchor_spl::token::Mint>,
 
-    /// CHECK: Pyth SOL/USD price feed - verified by Pyth SDK
-    pub sol_usd_price_feed: AccountInfo<'info>,
-
-    /// CHECK: Pyth USDT/USD price feed - verified by Pyth SDK
-    pub usdt_usd_price_feed: AccountInfo<'info>,
-
     pub system_program: Program<'info, System>,
-    pub token_program: Program<'info, Token>,
+    pub token_program: Program<'info, anchor_spl::token::Token>,
     pub associated_token_program: Program<'info, anchor_spl::associated_token::AssociatedToken>,
 }
-
-
-
-// Add account contexts at the end of staking.rs:
 
 #[derive(Accounts)]
 pub struct UnstakeWarden<'info> {
@@ -372,7 +499,7 @@ pub struct ClaimUnstake<'info> {
     pub token_program: Program<'info, Token>,
 }
 
-
+// Events
 
 #[event]
 pub struct WardenRegistered {
@@ -393,4 +520,55 @@ pub struct WardenUnstaked {
     pub authority: Pubkey,
     pub stake_amount: u64,
     pub stake_token: StakeToken,
+}
+
+// Custom error codes specific to oracle verification
+#[error_code]
+pub enum OracleError {
+    #[msg("Invalid Instructions sysvar account")]
+    InvalidInstructionsSysvar,
+    
+    #[msg("Ed25519Program instruction not found at expected index")]
+    Ed25519InstructionNotFound,
+    
+    #[msg("Instruction is not an Ed25519Program instruction")]
+    InvalidEd25519Instruction,
+    
+    #[msg("Ed25519Program instruction data is invalid or too short")]
+    InvalidEd25519Data,
+    
+    #[msg("Signature in Ed25519 instruction doesn't match expected signature")]
+    SignatureMismatch,
+    
+    #[msg("Public key in Ed25519 instruction doesn't match oracle authority")]
+    PublicKeyMismatch,
+    
+    #[msg("Message in Ed25519 instruction doesn't match expected message")]
+    MessageMismatch,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_create_oracle_message() {
+        let price = 150_000_000u64; // $150 in micro-units
+        let timestamp = 1234567890i64;
+        
+        let message = create_oracle_message(price, timestamp);
+        let message2 = create_oracle_message(price, timestamp);
+        
+        // Messages should be deterministic
+        assert_eq!(message, message2);
+        assert_eq!(message.len(), 32); // Keccak hash is 32 bytes
+        
+        // Different price should produce different message
+        let message3 = create_oracle_message(price + 1, timestamp);
+        assert_ne!(message, message3);
+        
+        // Different timestamp should produce different message
+        let message4 = create_oracle_message(price, timestamp + 1);
+        assert_ne!(message, message4);
+    }
 }

@@ -5,6 +5,7 @@ pub struct ProtocolConfig {
     pub authority: Pubkey,
     pub treasury: Pubkey,
     pub arkham_token_mint: Pubkey,
+    pub oracle_authority: Pubkey, // The authority allowed to sign price data
     pub base_rate_per_mb: u64, // in lamports
     pub protocol_fee_bps: u16,
     pub tier_thresholds: [u64; 3], // USD value
