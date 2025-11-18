@@ -217,7 +217,7 @@ pub fn verify_oracle_signature_via_sysvar(
     );
 
     // Extract signature from instruction data (starts at byte 14)
-    let sig_start = 14;
+    let sig_start = 16;
     let sig_end = sig_start + 64;
     let ix_signature = &data[sig_start..sig_end];
     
