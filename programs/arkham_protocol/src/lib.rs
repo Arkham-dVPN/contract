@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 
-declare_id!("6Qj2WJcAmvQUh6tTYMT1yuDLL6eSpp8cFY9PzPLCeSgj");
+declare_id!("B85X9aTrpWAdi1xhLvPmDPuYmfz5YdMd9X8qr7uU4H18");
 
 pub mod state;
 pub mod instructions;
@@ -191,6 +191,14 @@ pub mod arkham_protocol {
             warden_keys,
             subsidy_amounts,
         )
+    }
+
+    pub fn close_protocol_config(ctx: Context<CloseProtocolConfig>) -> Result<()> {
+        instructions::admin::close_protocol_config_handler(ctx)
+    }
+
+    pub fn migrate_protocol_config(ctx: Context<MigrateProtocolConfig>) -> Result<()> {
+        instructions::admin::migrate_protocol_config_handler(ctx)
     }
 }
 

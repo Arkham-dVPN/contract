@@ -362,3 +362,113 @@ pub struct ProtocolConfigInitialized {
     pub base_rate_per_mb: u64,
     pub protocol_fee_bps: u16,
 }
+
+/// Handler for force closing the protocol config
+/// This manually checks authority and transfers lamports without deserializing
+pub fn close_protocol_config_handler(ctx: Context<CloseProtocolConfig>) -> Result<()> {
+    let protocol_config = &ctx.accounts.protocol_config;
+    let receiver = &ctx.accounts.receiver;
+    
+    // Manual authority check by reading raw account data
+    // The authority pubkey is stored at bytes 8-40 (after 8-byte discriminator)
+    let data = protocol_config.try_borrow_data()?;
+    
+    // Check if account has enough data
+    require!(data.len() >= 40, ArkhamErrorCode::UnauthorizedAdminAction);
+    
+    // Extract authority from raw bytes
+    let stored_authority_bytes = &data[8..40];
+    let stored_authority = Pubkey::try_from(stored_authority_bytes)
+        .map_err(|_| ArkhamErrorCode::UnauthorizedAdminAction)?;
+    
+    // Verify the signer matches the stored authority
+    require!(
+        stored_authority == ctx.accounts.authority.key(),
+        ArkhamErrorCode::UnauthorizedAdminAction
+    );
+    
+    // Transfer all lamports to receiver
+    let protocol_config_lamports = protocol_config.lamports();
+    **protocol_config.try_borrow_mut_lamports()? = 0;
+    **receiver.try_borrow_mut_lamports()? = receiver
+        .lamports()
+        .checked_add(protocol_config_lamports)
+        .ok_or(ArkhamErrorCode::ArithmeticOverflow)?;
+    
+    // Zero out the data
+    let mut data_mut = protocol_config.try_borrow_mut_data()?;
+    data_mut.fill(0);
+    
+    msg!("Protocol config force closed. Lamports returned: {}", protocol_config_lamports);
+    
+    Ok(())
+}
+
+/// For accounts that have the old structure (without oracle_authority), we need a migration function
+pub fn migrate_protocol_config_handler(ctx: Context<MigrateProtocolConfig>) -> Result<()> {
+    // Verify the caller is the protocol authority
+    require!(
+        ctx.accounts.authority.key() == ctx.accounts.protocol_config.authority,
+        ArkhamErrorCode::UnauthorizedAdminAction
+    );
+
+    // Set the new oracle authority
+    ctx.accounts.protocol_config.oracle_authority = ctx.accounts.new_oracle_authority.key();
+
+    emit!(ProtocolConfigUpdated {
+        authority: ctx.accounts.authority.key(),
+        new_base_rate_per_mb: None,
+        new_protocol_fee_bps: None,
+        new_tier_thresholds: None,
+        new_tier_multipliers: None,
+        new_tokens_per_5gb: None,
+    });
+
+    Ok(())
+}
+
+// Add this new context to your admin.rs file
+// This replaces the existing CloseProtocolConfig context
+
+/// Force closes the protocol config account without deserializing
+/// This is useful for cleaning up accounts with incompatible data structures
+#[derive(Accounts)]
+pub struct CloseProtocolConfig<'info> {
+    /// Protocol config account to close - using AccountInfo to avoid deserialization
+    /// CHECK: We manually verify the PDA and authority without deserializing
+    #[account(
+        mut,
+        seeds = [b"protocol_config"],
+        bump,
+    )]
+    pub protocol_config: AccountInfo<'info>,
+
+    /// The authority that should match the one stored in the account
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    /// Receiver of the rent (can be the authority or another account)
+    /// CHECK: Receiver of rent
+    #[account(mut)]
+    pub receiver: AccountInfo<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+
+#[derive(Accounts)]
+pub struct MigrateProtocolConfig<'info> {
+    #[account(
+        mut,
+        seeds = [b"protocol_config"],
+        bump,
+    )]
+    pub protocol_config: Account<'info, ProtocolConfig>,
+
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    
+    /// New oracle authority to set
+    /// CHECK: Just a public key, doesn't need to sign
+    pub new_oracle_authority: AccountInfo<'info>,
+}
