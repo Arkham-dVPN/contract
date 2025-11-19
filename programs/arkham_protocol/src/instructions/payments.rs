@@ -12,29 +12,26 @@ pub fn deposit_escrow_handler(
     amount: u64,
     use_private: bool,
 ) -> Result<()> {
-    let seeker = &mut ctx.accounts.seeker;
-
     if use_private {
-        // TODO: Implement Elusiv CPI for private deposits
-        // This requires integrating the Elusiv SDK and performing a CPI
-        // to their deposit instruction. For now, we'll return an error.
         return err!(ArkhamErrorCode::PrivatePaymentsNotImplemented);
-    } else {
-        // Public deposit: Transfer SOL from authority to seeker's escrow PDA
-        let cpi_context = CpiContext::new(
-            ctx.accounts.system_program.to_account_info(),
-            system_program::Transfer {
-                from: ctx.accounts.authority.to_account_info(),
-                to: ctx.accounts.seeker_escrow.to_account_info(),
-            },
-        );
-        system_program::transfer(cpi_context, amount)?;
-
-        // Update seeker's escrow balance
-        seeker.escrow_balance = seeker.escrow_balance
-            .checked_add(amount)
-            .ok_or(ArkhamErrorCode::ArithmeticOverflow)?;
     }
+
+    // Public deposit: Transfer SOL from authority to seeker's account
+    // The `to` account for the transfer is the `seeker` account itself.
+    let cpi_context = CpiContext::new(
+        ctx.accounts.system_program.to_account_info(),
+        system_program::Transfer {
+            from: ctx.accounts.authority.to_account_info(),
+            to: ctx.accounts.seeker.to_account_info(),
+        },
+    );
+    system_program::transfer(cpi_context, amount)?;
+
+    // Now that the transfer is done, we can mutably borrow seeker to update its balance.
+    let seeker = &mut ctx.accounts.seeker;
+    seeker.escrow_balance = seeker.escrow_balance
+        .checked_add(amount)
+        .ok_or(ArkhamErrorCode::ArithmeticOverflow)?;
 
     emit!(EscrowDeposited {
         authority: seeker.authority,
@@ -464,10 +461,6 @@ pub struct DepositEscrow<'info> {
 
     #[account(mut)]
     pub authority: Signer<'info>,
-
-    /// CHECK: Seeker's escrow PDA
-    #[account(mut, seeds = [b"seeker_escrow", authority.key().as_ref()], bump)]
-    pub seeker_escrow: AccountInfo<'info>,
 
     pub system_program: Program<'info, System>,
 }
