@@ -454,7 +454,9 @@ pub fn claim_arkham_tokens_handler(ctx: Context<ClaimArkhamTokens>) -> Result<()
 #[derive(Accounts)]
 pub struct DepositEscrow<'info> {
     #[account(
-        mut,
+        init_if_needed,
+        payer = authority,
+        space = 8 + 32 + 8 + (1 + 32) + 8 + 8 + 1 + (1 + 8), // 107 bytes for Seeker struct
         seeds = [b"seeker", authority.key().as_ref()],
         bump,
         has_one = authority
