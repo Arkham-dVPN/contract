@@ -591,7 +591,8 @@ pub struct ClaimArkhamTokens<'info> {
     pub arkham_mint: Account<'info, Mint>,
 
     #[account(
-        mut,
+        init_if_needed,
+        payer = authority,
         associated_token::mint = arkham_mint,
         associated_token::authority = authority,
     )]
