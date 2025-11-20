@@ -97,12 +97,14 @@ pub mod arkham_protocol {
     pub fn submit_bandwidth_proof(
         ctx: Context<SubmitBandwidthProof>,
         mb_consumed: u64,
+        timestamp: i64,
         seeker_signature: [u8; 64],
         warden_signature: [u8; 64],
     ) -> Result<()> {
         instructions::payments::submit_bandwidth_proof_handler(
             ctx,
             mb_consumed,
+            timestamp,
             seeker_signature,
             warden_signature,
         )

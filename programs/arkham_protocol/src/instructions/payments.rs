@@ -16,19 +16,26 @@ pub fn deposit_escrow_handler(
         return err!(ArkhamErrorCode::PrivatePaymentsNotImplemented);
     }
 
+    let seeker = &mut ctx.accounts.seeker;
+
+    // If the account is being initialized, its authority will be the default null pubkey.
+    // Set it to the signer of this transaction. This only runs once.
+    if seeker.authority == Pubkey::default() {
+        seeker.authority = ctx.accounts.authority.key();
+    }
+
     // Public deposit: Transfer SOL from authority to seeker's account
     // The `to` account for the transfer is the `seeker` account itself.
     let cpi_context = CpiContext::new(
         ctx.accounts.system_program.to_account_info(),
         system_program::Transfer {
             from: ctx.accounts.authority.to_account_info(),
-            to: ctx.accounts.seeker.to_account_info(),
+            to: seeker.to_account_info(),
         },
     );
     system_program::transfer(cpi_context, amount)?;
 
     // Now that the transfer is done, we can mutably borrow seeker to update its balance.
-    let seeker = &mut ctx.accounts.seeker;
     seeker.escrow_balance = seeker.escrow_balance
         .checked_add(amount)
         .ok_or(ArkhamErrorCode::ArithmeticOverflow)?;
@@ -142,6 +149,7 @@ pub fn start_connection_handler(
 pub fn submit_bandwidth_proof_handler(
     ctx: Context<SubmitBandwidthProof>,
     mb_consumed: u64,
+    timestamp: i64,
     seeker_signature: [u8; 64],
     warden_signature: [u8; 64],
 ) -> Result<()> {
@@ -159,7 +167,7 @@ pub fn submit_bandwidth_proof_handler(
     // 1. Validate the proof using bandwidth module helpers
     crate::instructions::bandwidth::validate_bandwidth_proof(
         mb_consumed,
-        clock.unix_timestamp,
+        timestamp,
         clock.unix_timestamp,
         &seeker_signature,
         &warden_signature,
@@ -169,7 +177,7 @@ pub fn submit_bandwidth_proof_handler(
     let proof_message = crate::instructions::bandwidth::create_proof_message(
         &connection_key,
         mb_consumed,
-        clock.unix_timestamp,
+        timestamp,
     );
     
     // REAL Ed25519 VERIFICATION using instruction introspection
