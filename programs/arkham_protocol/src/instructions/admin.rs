@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::Token;
-use crate::state::{ProtocolConfig, GeoPremium};
+use crate::state::{ProtocolConfig, GeoPremium, Warden};
 use crate::ArkhamErrorCode;
 
 /// Initializes the protocol configuration with default parameters
@@ -224,6 +224,41 @@ pub fn distribute_subsidies_handler(
     Ok(())
 }
 
+/// Updates a Warden's Peer ID. Only callable by the protocol authority.
+/// This is a developer/admin tool to fix registration errors.
+pub fn update_warden_peer_id_handler(ctx: Context<UpdateWardenPeerId>, new_peer_id: String) -> Result<()> {
+    let protocol_config = &ctx.accounts.protocol_config;
+    let warden = &mut ctx.accounts.warden;
+
+    // Verify the caller is the protocol authority
+    require!(
+        ctx.accounts.authority.key() == protocol_config.authority,
+        ArkhamErrorCode::UnauthorizedAdminAction
+    );
+
+    // Basic validation for Peer ID format
+    require!(
+        new_peer_id.starts_with("12D3KooW"),
+        ArkhamErrorCode::InvalidPeerId
+    );
+    require!(
+        new_peer_id.len() > 40 && new_peer_id.len() < 60,
+        ArkhamErrorCode::InvalidPeerId
+    );
+
+    let old_peer_id = warden.peer_id.clone();
+    warden.peer_id = new_peer_id.clone();
+
+    emit!(WardenPeerIdUpdated {
+        warden_authority: warden.authority,
+        old_peer_id,
+        new_peer_id,
+    });
+
+    Ok(())
+}
+
+
 // Account contexts:
 
 #[derive(Accounts)]
@@ -331,6 +366,21 @@ pub struct InitializeProtocolConfig<'info> {
     pub system_program: Program<'info, System>,
 }
 
+#[derive(Accounts)]
+pub struct UpdateWardenPeerId<'info> {
+    #[account(seeds = [b"protocol_config"], bump)]
+    pub protocol_config: Account<'info, ProtocolConfig>,
+
+    /// The protocol authority must sign to authorize this change.
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    /// The warden account to be updated.
+    #[account(mut)]
+    pub warden: Account<'info, Warden>,
+}
+
+
 // Events:
 
 #[event]
@@ -362,6 +412,14 @@ pub struct ProtocolConfigInitialized {
     pub base_rate_per_mb: u64,
     pub protocol_fee_bps: u16,
 }
+
+#[event]
+pub struct WardenPeerIdUpdated {
+    pub warden_authority: Pubkey,
+    pub old_peer_id: String,
+    pub new_peer_id: String,
+}
+
 
 /// Handler for force closing the protocol config
 /// This manually checks authority and transfers lamports without deserializing

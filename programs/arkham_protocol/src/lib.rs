@@ -202,6 +202,10 @@ pub mod arkham_protocol {
     pub fn migrate_protocol_config(ctx: Context<MigrateProtocolConfig>) -> Result<()> {
         instructions::admin::migrate_protocol_config_handler(ctx)
     }
+
+    pub fn update_warden_peer_id(ctx: Context<UpdateWardenPeerId>, new_peer_id: String) -> Result<()> {
+        instructions::admin::update_warden_peer_id_handler(ctx, new_peer_id)
+    }
 }
 
 #[derive(Accounts)]
@@ -279,6 +283,10 @@ pub enum ArkhamErrorCode {
     InvalidSubsidyDistribution,
     #[msg("Insufficient treasury balance for subsidy distribution.")]
     InsufficientTreasuryBalance,
+    #[msg("The provided Peer ID is invalid.")]
+    InvalidPeerId,
+    #[msg("Unauthorized warden update attempt.")]
+    UnauthorizedWardenUpdate,
 
     // General errors
     #[msg("Arithmetic operation resulted in overflow.")]

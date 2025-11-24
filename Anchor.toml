@@ -20,3 +20,4 @@ wallet = "../wallet.json"
 
 [scripts]
 test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
+update-peer-id = "yarn run ts-node scripts/update-peer-id.ts"

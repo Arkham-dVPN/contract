@@ -6,4 +6,4 @@ node_modules
 test-ledger
 .yarn
 scripts/convert-key.ts
-
+scripts/update-peer-id.ts
