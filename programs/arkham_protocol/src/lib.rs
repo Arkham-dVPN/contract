@@ -206,6 +206,10 @@ pub mod arkham_protocol {
     pub fn update_warden_peer_id(ctx: Context<UpdateWardenPeerId>, new_peer_id: String) -> Result<()> {
         instructions::admin::update_warden_peer_id_handler(ctx, new_peer_id)
     }
+
+    pub fn migrate_warden_peer_id(ctx: Context<MigrateWardenPeerId>) -> Result<()> {
+        instructions::admin::migrate_warden_peer_id_handler(ctx)
+    }
 }
 
 #[derive(Accounts)]

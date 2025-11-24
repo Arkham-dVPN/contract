@@ -258,6 +258,163 @@ pub fn update_warden_peer_id_handler(ctx: Context<UpdateWardenPeerId>, new_peer_
     Ok(())
 }
 
+/// Migrates a Warden account with corrupted PeerId field by fixing the Borsh string length prefix
+/// This is a one-time migration for accounts where the length prefix is incorrect but the data is intact
+pub fn migrate_warden_peer_id_handler(ctx: Context<MigrateWardenPeerId>) -> Result<()> {
+    let warden_account = &ctx.accounts.warden;
+    let authority = &ctx.accounts.authority;
+
+    // Get raw account data
+    let data = warden_account.try_borrow_data()?;
+
+    // Verify we have enough data for a Warden account
+    require!(data.len() >= 200, ArkhamErrorCode::InvalidPeerId);
+
+    // Verify discriminator matches Warden account type
+    // Discriminator bytes from IDL: [73, 11, 82, 46, 202, 0, 179, 133]
+    let expected_discriminator: [u8; 8] = [73, 11, 82, 46, 202, 0, 179, 133];
+    require!(
+        &data[0..8] == expected_discriminator,
+        ArkhamErrorCode::InvalidPeerId
+    );
+
+    // Extract and verify authority (bytes 8-40)
+    let stored_authority_bytes = &data[8..40];
+    let stored_authority = Pubkey::try_from(stored_authority_bytes)
+        .map_err(|_| ArkhamErrorCode::UnauthorizedWardenUpdate)?;
+
+    require!(
+        stored_authority == authority.key(),
+        ArkhamErrorCode::UnauthorizedWardenUpdate
+    );
+
+    msg!("Verified authority: {}", stored_authority);
+
+    // PeerId field starts at offset 40 (after discriminator + authority)
+    // Structure: 4-byte length prefix (little-endian u32) + UTF-8 string bytes
+    let peer_id_offset = 40;
+    let length_bytes = &data[peer_id_offset..peer_id_offset + 4];
+    let stored_length = u32::from_le_bytes([
+        length_bytes[0],
+        length_bytes[1],
+        length_bytes[2],
+        length_bytes[3],
+    ]);
+
+    msg!("Current PeerId length prefix: {}", stored_length);
+
+    // The actual PeerId string data starts at offset 44
+    let peer_id_data_offset = peer_id_offset + 4;
+
+    // Find the actual string length by detecting boundaries
+    // Valid PeerIDs start with "12D3KooW" and are typically 40-53 characters
+    let max_peer_id_length = 60; // Safety bound
+    let search_end = std::cmp::min(peer_id_data_offset + max_peer_id_length, data.len());
+    let peer_id_slice = &data[peer_id_data_offset..search_end];
+
+    // Strategy 1: Find boundary by looking for StakeToken enum (should be 0, 1, or 2)
+    let mut actual_length = 0;
+    for i in 40..max_peer_id_length {
+        let test_offset = peer_id_data_offset + i;
+        if test_offset >= data.len() {
+            break;
+        }
+
+        // Check if this position could be the start of StakeToken enum
+        let potential_stake_token = data[test_offset];
+
+        // StakeToken enum values: Sol = 0, Usdc = 1, Usdt = 2
+        if potential_stake_token <= 2 {
+            // Validate by checking if we have a valid PeerId up to this point
+            if i <= peer_id_slice.len() {
+                let potential_peer_id = &peer_id_slice[..i];
+                if let Ok(peer_id_str) = std::str::from_utf8(potential_peer_id) {
+                    // Valid PeerIDs must start with "12D3KooW" and be at least 40 chars
+                    if peer_id_str.starts_with("12D3KooW") && peer_id_str.len() >= 40 && peer_id_str.len() <= 60 {
+                        actual_length = i;
+                        msg!("Found PeerId boundary at offset {} (length: {})", test_offset, actual_length);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Strategy 2: If boundary detection failed, try common PeerId lengths
+    if actual_length == 0 {
+        msg!("Boundary detection failed, trying common PeerId lengths");
+        for test_len in [44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 42, 43, 54, 55, 56] {
+            if test_len <= peer_id_slice.len() {
+                if let Ok(peer_id_str) = std::str::from_utf8(&peer_id_slice[..test_len]) {
+                    if peer_id_str.starts_with("12D3KooW") && peer_id_str.len() >= 40 {
+                        actual_length = test_len;
+                        msg!("Using common PeerId length: {}", actual_length);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Validate we found a valid length
+    require!(actual_length > 0, ArkhamErrorCode::InvalidPeerId);
+    require!(actual_length >= 40, ArkhamErrorCode::InvalidPeerId);
+    require!(actual_length <= 60, ArkhamErrorCode::InvalidPeerId);
+
+    // Extract and validate the PeerId string
+    let peer_id_bytes = &peer_id_slice[..actual_length];
+    let peer_id_str = std::str::from_utf8(peer_id_bytes)
+        .map_err(|_| ArkhamErrorCode::InvalidPeerId)?;
+
+    // Final validation: must be a valid libp2p PeerId format
+    require!(
+        peer_id_str.starts_with("12D3KooW"),
+        ArkhamErrorCode::InvalidPeerId
+    );
+    require!(
+        peer_id_str.len() >= 40 && peer_id_str.len() <= 60,
+        ArkhamErrorCode::InvalidPeerId
+    );
+
+    msg!("Detected PeerId: {}", peer_id_str);
+    msg!("Actual length: {} bytes", actual_length);
+
+    // Only update if the length prefix is incorrect
+    if stored_length != actual_length as u32 {
+        // Clone the string before dropping the borrow
+        let peer_id_clone = peer_id_str.to_string();
+
+        drop(data); // Drop the immutable borrow before getting mutable
+
+        // Get mutable reference and update the length prefix
+        let mut data_mut = warden_account.try_borrow_mut_data()?;
+
+        // Write the correct length as little-endian u32
+        let correct_length_bytes = (actual_length as u32).to_le_bytes();
+        data_mut[peer_id_offset..peer_id_offset + 4].copy_from_slice(&correct_length_bytes);
+
+        msg!(
+            "✓ Fixed PeerId length prefix: {} -> {}",
+            stored_length,
+            actual_length
+        );
+
+        // Emit event for audit trail
+        emit!(WardenPeerIdMigrated {
+            warden_authority: authority.key(),
+            peer_id: peer_id_clone,
+            old_length: stored_length,
+            new_length: actual_length as u32,
+        });
+
+        msg!("Migration completed successfully");
+    } else {
+        msg!("PeerId length prefix is already correct ({}), no migration needed", stored_length);
+    }
+
+    Ok(())
+}
+
 
 // Account contexts:
 
@@ -380,6 +537,26 @@ pub struct UpdateWardenPeerId<'info> {
     pub warden: Account<'info, Warden>,
 }
 
+/// Account context for migrating a Warden's corrupted PeerId field
+#[derive(Accounts)]
+pub struct MigrateWardenPeerId<'info> {
+    /// The warden account to migrate - using AccountInfo to avoid deserialization errors
+    /// CHECK: We manually verify the PDA seeds and authority without deserializing the account
+    #[account(
+        mut,
+        seeds = [b"warden", authority.key().as_ref()],
+        bump,
+    )]
+    pub warden: AccountInfo<'info>,
+
+    /// The warden's authority must sign to authorize this migration
+    /// Only the warden owner can migrate their own account
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
 
 // Events:
 
@@ -418,6 +595,19 @@ pub struct WardenPeerIdUpdated {
     pub warden_authority: Pubkey,
     pub old_peer_id: String,
     pub new_peer_id: String,
+}
+
+/// Event emitted when a Warden's PeerId is successfully migrated
+#[event]
+pub struct WardenPeerIdMigrated {
+    /// The authority (owner) of the warden
+    pub warden_authority: Pubkey,
+    /// The corrected PeerId string
+    pub peer_id: String,
+    /// The incorrect length that was stored before migration
+    pub old_length: u32,
+    /// The correct length after migration
+    pub new_length: u32,
 }
 
 
